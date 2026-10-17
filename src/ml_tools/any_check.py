@@ -1,5 +1,7 @@
 """Flag local names whose type is Any/Unknown (shown white in the editor), e.g. `logits = model(x)`.
 
+The two rules are switched on by a temporary config outside the project that extends the project's
+own (for a .pyn, the one in byname's mirror), so no file is written into the project.
 basedpyright's reportAny also flags returns, arguments and assignments to declared names; those are
 fine, so only `Type of "name" is ...` is kept, and only when `name` has no annotation in its scope.
 A partially unknown name is kept only if part of it shows white: `list[Unknown | Tensor]` still
@@ -9,13 +11,17 @@ Usage: uv run any-check FILE.pyn|FILE.py ...
 """
 
 import ast
+import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
-RULES = "reportAny=true, reportUnknownVariableType=true"
+# the rules a normal run leaves off, switched on for this check only
+RULES = {"reportAny": True, "reportUnknownVariableType": True}
+CONFIGS = ("pyrightconfig.json", "pyproject.toml")  # where a project configures the checker
 HIT = re.compile(
     r':(\d+):(\d+) - error: Type of "(\w+)" is (Any|partially unknown|unknown)'
 )
@@ -28,7 +34,7 @@ SKIP = re.compile(r"#.*\bany:ok\b")
 
 
 class Finding(NamedTuple):
-    line: int  # in basedpyright's output, so one past the file's own line
+    line: int
     col: int
     name: str
     kind: str  # Any, partially unknown or unknown
@@ -98,22 +104,45 @@ def declared(tree: ast.Module, line: int, name: str) -> bool:
     )
 
 
+def project_root(path: Path) -> Path:
+    # the nearest folder above path holding pyproject.toml
+    for d in path.parents:
+        if (d / "pyproject.toml").exists():
+            return d
+    raise RuntimeError(f"no pyproject.toml above {path}")
+
+
+def base_config(path: Path) -> Path:
+    # the checker config the project's own runs use. A .pyn is checked in byname's
+    # mirror (translated, under ~/.cache/byname), so its config is the mirror's
+    # copy, whose relative paths (extraPaths) then point into the mirror
+    root = project_root(path)
+    found = [name for name in CONFIGS if (root / name).exists()]
+    assert found, f"no {' or '.join(CONFIGS)} in {root}"
+    if path.suffix == ".pyn":
+        from byname.tools import mirror_dir
+
+        return mirror_dir(root, "tools") / found[0]
+    return root / found[0]
+
+
+def basedpyright_output(path: Path) -> str:
+    # one file checked with RULES on, through a config in a temp folder that
+    # extends the project's, so nothing is written into the project
+    cmd = ["byname", "tool", "basedpyright"] if path.suffix == ".pyn" else ["basedpyright"]
+    with tempfile.TemporaryDirectory() as tmp:
+        config = Path(tmp) / "pyrightconfig.json"
+        config.write_text(json.dumps({"extends": str(base_config(path)), **RULES}))
+        run = subprocess.run(
+            [*cmd, "-p", str(config), str(path)],
+            capture_output=True, text=True, check=False, cwd=project_root(path),
+        )
+    return run.stdout
+
+
 def check(path: Path) -> list[str]:
     # one file -> its untyped names, as "path:line:col - name is kind"
-    # a copy in the same folder, so imports resolve the same, with the rules switched on
-    tmp = path.with_name(f"_anycheck_{path.name}")
-    _ = tmp.write_text(f"# pyright: {RULES}\n" + path.read_text())
-    try:
-        cmd = (
-            ["byname", "tool", "basedpyright"]
-            if path.suffix == ".pyn"
-            else ["basedpyright"]
-        )
-        out = subprocess.run(
-            [*cmd, str(tmp)], capture_output=True, text=True, check=False
-        ).stdout
-    finally:
-        tmp.unlink()
+    out = basedpyright_output(path)
     tree = source_tree(path)
     lines = path.read_text().splitlines()
     # a library's own Unknowns (`from jaxtyping import jaxtyped`): nothing a local annotation can fix
@@ -126,7 +155,7 @@ def check(path: Path) -> list[str]:
     }
     hits: set[tuple[int, int, str, str]] = set()
     for found in findings(out):
-        line = found.line - 1  # the rules comment shifted every line down
+        line = found.line
         col = found.col
         name = found.name
         if not lines[line - 1][col - 1 :].startswith(name):
