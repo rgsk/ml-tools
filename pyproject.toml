@@ -1,0 +1,21 @@
+[project]
+name = "ml-tools"
+version = "0.1.0"
+description = "Dev tools shared by the ML projects in ../ (llm-final, asr, diffusion-final)"
+requires-python = ">=3.12"
+# none at install: any-check runs the project's own basedpyright, and imports
+# byname only for .pyn files, both from the project's environment
+dependencies = []
+
+[project.scripts]
+any-check = "ml_tools.any_check:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ml_tools"]
+
+[dependency-groups]
+dev = ["pytest>=9.1.1"]
