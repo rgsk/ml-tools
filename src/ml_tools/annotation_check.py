@@ -19,7 +19,6 @@ Usage: uv run annotation-check FILE.pyn|FILE.py ...
 """
 
 import ast
-import json
 import re
 import subprocess
 import sys
@@ -30,9 +29,9 @@ from typing import NamedTuple
 
 from ml_tools.any_check import (
     CONFIGS,
-    RULES,
     Finding,
     Func,
+    checker_config,
     findings,
     per_file,
     project_root,
@@ -266,7 +265,7 @@ def check_all(paths: list[Path]) -> list[str]:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "pyrightconfig.json"
-            config.write_text(json.dumps({"extends": str(out / config_name), **RULES}))
+            config.write_text(checker_config(out / config_name))
             run = subprocess.run(
                 ["basedpyright", "--pythonpath", sys.executable, "-p", str(config),
                  *map(str, probe_files)],

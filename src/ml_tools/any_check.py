@@ -130,6 +130,14 @@ def base_config(path: Path) -> Path:
     return root / found[0]
 
 
+def checker_config(base: Path) -> str:
+    # a config that switches RULES on over base. A config's folder is the project root, so the
+    # temp folder would be; the execution root stays base's folder, where `from oracle import
+    # Oracle` in tests/ finds tests/oracle.py (a project's own executionEnvironments would be lost)
+    root = {"root": str(base.parent)}
+    return json.dumps({"extends": str(base), **RULES, "executionEnvironments": [root]})
+
+
 def basedpyright_output(paths: list[Path]) -> str:
     # files of one project and one kind (.pyn or .py) checked with RULES on in one run, through a
     # config in a temp folder that extends the project's, so nothing is written into the project
@@ -137,7 +145,7 @@ def basedpyright_output(paths: list[Path]) -> str:
     cmd = ["byname", "tool", "basedpyright"] if first.suffix == ".pyn" else ["basedpyright"]
     with tempfile.TemporaryDirectory() as tmp:
         config = Path(tmp) / "pyrightconfig.json"
-        config.write_text(json.dumps({"extends": str(base_config(first)), **RULES}))
+        config.write_text(checker_config(base_config(first)))
         run = subprocess.run(
             [*cmd, "-p", str(config), *map(str, paths)],
             capture_output=True, text=True, check=False, cwd=project_root(first),
