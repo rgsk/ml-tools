@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from ml_tools.any_check import findings, per_file, still_completes
+from ml_tools.any_check import findings, per_file, still_completes, untyped
 
 # what `byname tool basedpyright` prints with reportUnknownVariableType on: the
 # finding, then the full type on the line under it
@@ -78,3 +78,32 @@ def test_one_runs_output_splits_per_file_with_each_findings_full_type():
     assert norms.type_text == "list[Unknown | Tensor]"
     (logits,) = findings(files[ROOT / "src/train.pyn"])
     assert logits.name == "logits"
+
+
+# an attribute finding is reported where its expression starts. It's kept when
+# the root is declared, so the Any comes from the expression, and dropped when
+# the root is an undeclared Any name, which is reported itself
+SOURCE = """\
+def show(axes: list, logits):
+    axes[0].imshow
+    logits.shape
+"""
+ATTRIBUTES = """\
+  x.py:1:22 - error: Type of "logits" is Any (reportAny)
+  x.py:2:5 - error: Type of "imshow" is Any (reportAny)
+  x.py:3:5 - error: Type of "shape" is Any (reportAny)
+"""
+
+
+def test_an_attribute_is_reported_only_when_its_root_is_declared(tmp_path: Path):
+    path = tmp_path / "x.py"
+    path.write_text(SOURCE)
+    reports = untyped(path, findings(ATTRIBUTES))
+    assert reports == [f"{path}:1:22 - logits is Any", f"{path}:2:5 - axes[0].imshow is Any"]
+
+
+def test_an_unannotated_parameter_is_a_finding():
+    (found,) = findings(
+        '  x.py:116:16 - error: Type of parameter "event" is unknown (reportUnknownParameterType)\n'
+    )
+    assert (found.name, found.kind) == ("event", "unknown")

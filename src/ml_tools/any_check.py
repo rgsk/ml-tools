@@ -1,9 +1,10 @@
 """Flag local names whose type is Any/Unknown (shown white in the editor), e.g. `logits = model(x)`.
 
-The two rules are switched on by a temporary config outside the project that extends the project's
+The three rules are switched on by a temporary config outside the project that extends the project's
 own (for a .pyn, the one in byname's mirror), so no file is written into the project.
 basedpyright's reportAny also flags returns, arguments and assignments to declared names; those are
-fine, so only `Type of "name" is ...` is kept, and only when `name` has no annotation in its scope.
+fine, so only `Type of "name" is ...` (or `Type of parameter "name"`) is kept, and only when `name`
+has no annotation in its scope.
 A partially unknown name is kept only if part of it shows white: `list[Unknown | Tensor]` still
 completes as a Tensor (torch's own untyped returns cause these), `list[Unknown]` doesn't.
 A line with `# any:ok` in its comment is skipped: an Any that's fine (`std *= n ** -0.5  # any:ok`).
@@ -21,11 +22,11 @@ from pathlib import Path
 from typing import NamedTuple
 
 # the rules a normal run leaves off, switched on for this check only
-RULES = {"reportAny": True, "reportUnknownVariableType": True}
+RULES = {"reportAny": True, "reportUnknownVariableType": True, "reportUnknownParameterType": True}
 CONFIGS = ("pyrightconfig.json", "pyproject.toml")  # where a project configures the checker
 HIT = re.compile(
-    r':(\d+):(\d+) - error: Type of "(\w+)" is (Any|partially unknown|unknown)'
-)
+    r':(\d+):(\d+) - error: Type of (?:parameter )?"(\w+)" is (Any|partially unknown|unknown)'
+)  # a parameter with no annotation and no default (`def on_key(event)`) is reported as unknown
 # the line basedpyright prints under a partially unknown finding, with the full type
 DETAIL = re.compile(r'^\s+Type of "(\w+)" is "(.*)"')
 # a diagnostic line and its file, as `byname tool` (project-relative) or basedpyright (absolute) prints
@@ -193,14 +194,30 @@ def untyped(path: Path, found_list: list[Finding]) -> list[str]:
         for line in range(n.lineno, (n.end_lineno or n.lineno) + 1)
         for a in n.names
     }
+    # undeclared names that are Any themselves. An attribute of one (`logits.shape`) is fixed by
+    # annotating the name, so only the name is reported
+    any_names = {
+        f.name
+        for f in found_list
+        if lines[f.line - 1][f.col - 1 :].startswith(f.name) and not declared(tree, f.line, f.name)
+    }
     hits: set[tuple[int, int, str, str]] = set()
     for found in found_list:
         line = found.line
         col = found.col
         name = found.name
-        if not lines[line - 1][col - 1 :].startswith(name):
-            continue  # `logits.shape`, reported at `logits`: an attribute of an Any value, not a name
-        if SKIP.search(lines[line - 1]):
+        text = lines[line - 1]
+        if not text[col - 1 :].startswith(name):
+            # an attribute, reported where its expression starts. Its root is declared, so the Any
+            # comes from the expression (`axes[b, 0].imshow` with `axes: np.ndarray`)
+            root = re.match(r"\w*", text[col - 1 :])
+            if (root is not None and root.group() in any_names) or SKIP.search(text):
+                continue
+            end = text.find(f".{name}", col - 1)
+            shown = text[col - 1 : end + 1 + len(name)] if end >= 0 else name
+            hits.add((line, col, shown, found.kind))
+            continue
+        if SKIP.search(text):
             continue
         if (line, name) in imported:
             continue
