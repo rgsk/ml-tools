@@ -9,6 +9,7 @@ dependencies = []
 
 [project.scripts]
 any-check = "ml_tools.any_check:main"
+annotation-check = "ml_tools.annotation_check:main"
 
 [build-system]
 requires = ["hatchling"]

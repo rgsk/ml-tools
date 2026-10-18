@@ -13,20 +13,29 @@ Lists local names whose type is `Any`/`Unknown`, which show white in the editor
 
     uv run any-check src/model.pyn tests/test_model.pyn
 
-`--redundant` goes the other way: it lists annotations that inference already
-gives, e.g. `cfg: TrainCfg = TrainCfg(...)` or `n: int = 0`. It leaves alone
-class fields, `Final`/`ClassVar`/`TypeAlias`, annotations that change the type
-(`x: float = 0`, `xs: list[int] = []`) and byname record literals
-(`row: EvalRow = (step=10, ...)`), whose type comes from the annotation, and
-container literals (`metrics: dict[str, float] = {...}`), whose annotation
-checks each element.
-Mark one kept on purpose, for the reader, with `# any:explicit` on its line.
-It also lists annotations whose type is itself `Unknown`/`Any` to the checker,
-e.g. `table: pa.Table` without pyarrow's stubs: the name still shows white.
+## annotation-check
 
-    uv run any-check --redundant src/model.pyn
+any-check plus two checks on annotations, all in one basedpyright run (the
+editor task uses it):
 
-A project adds it as a dev dependency:
+- redundant: inference already gives the type, e.g.
+  `cfg: TrainCfg = TrainCfg(...)` or `n: int = 0`. Mark one kept on purpose,
+  for the reader, with `# any:explicit` on its line.
+- untyped: the annotation's type is itself `Unknown`/`Any` to the checker,
+  e.g. `table: pa.Table` without pyarrow's stubs, so the name still shows
+  white. `# any:explicit` doesn't hide this one.
+
+It leaves alone class fields, `Final`/`ClassVar`/`TypeAlias`, a name bound
+again in its scope (the annotation types the later bindings too), annotations
+that change the type (`x: float = 0`), byname record literals
+(`row: EvalRow = (step=10, ...)`) and container literals
+(`metrics: dict[str, float] = {...}`, whose annotation checks each element).
+Every file goes in one run, so torch's types load once: all of llm-final in
+about 2s, against any-check's 19s.
+
+    uv run annotation-check src/model.pyn tests/test_model.pyn
+
+Both commands come from one dev dependency:
 
     [dependency-groups]
     dev = [..., "ml-tools"]

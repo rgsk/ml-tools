@@ -7,18 +7,8 @@ fine, so only `Type of "name" is ...` is kept, and only when `name` has no annot
 A partially unknown name is kept only if part of it shows white: `list[Unknown | Tensor]` still
 completes as a Tensor (torch's own untyped returns cause these), `list[Unknown]` doesn't.
 A line with `# any:ok` in its comment is skipped: an Any that's fine (`std *= n ** -0.5  # any:ok`).
-
---redundant goes the other way: it lists annotations that inference already gives, e.g.
-`cfg: TrainCfg = TrainCfg(...)`. Before each `name: T = value` in a function or module body, a copy
-of the file gets two probes, `reveal_type` of value alone and of a function returning T, and the
-annotation is redundant when the two agree. It's wrong when T itself is Unknown or Any to the
-checker (`table: pa.Table` without pyarrow's stubs): the name still shows white, though the main
-check, seeing an annotation, passes it. The copy goes in byname's mirror, next to the file's own
-copy so its imports resolve, and is removed after the run. A redundant annotation kept on purpose,
-for the reader, is marked `# any:explicit` on its line (`batch: Batch = to_device(...)  # any:explicit`);
-the mark doesn't hide an Unknown T, which still shows white. A container literal's annotation
-(`metrics: dict[str, float] = {...}`) is never redundant: it checks each element.
-Usage: uv run any-check [--redundant] FILE.pyn|FILE.py ...
+A project's files are checked in one run per config (.pyn or .py), so torch's types load once.
+Usage: uv run any-check FILE.pyn|FILE.py ...
 """
 
 import ast
@@ -27,7 +17,6 @@ import re
 import subprocess
 import sys
 import tempfile
-from collections import Counter
 from pathlib import Path
 from typing import NamedTuple
 
@@ -39,11 +28,13 @@ HIT = re.compile(
 )
 # the line basedpyright prints under a partially unknown finding, with the full type
 DETAIL = re.compile(r'^\s+Type of "(\w+)" is "(.*)"')
+# a diagnostic line and its file, as `byname tool` (project-relative) or basedpyright (absolute) prints
+# it; the lines under it, indented with \xa0s, carry no location
+LOCATION = re.compile(r"^\s+(\S+\.pyn?):\d+:\d+ - ")
 # an Unknown that shares a union with another type, at either end of the union
 UNKNOWN_IN_UNION = re.compile(r"Unknown \| | \| Unknown")
 Func = ast.FunctionDef | ast.AsyncFunctionDef
 SKIP = re.compile(r"#.*\bany:ok\b")
-EXPLICIT = re.compile(r"#.*\bany:explicit\b")  # a redundant annotation kept for the reader
 
 
 class Finding(NamedTuple):
@@ -139,23 +130,51 @@ def base_config(path: Path) -> Path:
     return root / found[0]
 
 
-def basedpyright_output(path: Path) -> str:
-    # one file checked with RULES on, through a config in a temp folder that
-    # extends the project's, so nothing is written into the project
-    cmd = ["byname", "tool", "basedpyright"] if path.suffix == ".pyn" else ["basedpyright"]
+def basedpyright_output(paths: list[Path]) -> str:
+    # files of one project and one kind (.pyn or .py) checked with RULES on in one run, through a
+    # config in a temp folder that extends the project's, so nothing is written into the project
+    first = paths[0]
+    cmd = ["byname", "tool", "basedpyright"] if first.suffix == ".pyn" else ["basedpyright"]
     with tempfile.TemporaryDirectory() as tmp:
         config = Path(tmp) / "pyrightconfig.json"
-        config.write_text(json.dumps({"extends": str(base_config(path)), **RULES}))
+        config.write_text(json.dumps({"extends": str(base_config(first)), **RULES}))
         run = subprocess.run(
-            [*cmd, "-p", str(config), str(path)],
-            capture_output=True, text=True, check=False, cwd=project_root(path),
+            [*cmd, "-p", str(config), *map(str, paths)],
+            capture_output=True, text=True, check=False, cwd=project_root(first),
         )
     return run.stdout
 
 
-def check(path: Path) -> list[str]:
-    # one file -> its untyped names, as "path:line:col - name is kind"
-    out = basedpyright_output(path)
+def per_file(out: str, root: Path) -> dict[Path, str]:
+    # one run's output -> each file's diagnostics, a location line with the lines under it
+    files: dict[Path, list[str]] = {}
+    current: list[str] | None = None
+    for text in out.splitlines():
+        hit = LOCATION.match(text)
+        if hit is not None:
+            current = files.setdefault((root / hit.group(1)).resolve(), [])
+            current.append(text)
+        elif current is not None and text[:1].isspace():
+            current.append(text)  # the full type under a finding
+        else:
+            current = None
+    return {path: "\n".join(lines) for path, lines in files.items()}
+
+
+def check(paths: list[Path]) -> list[str]:
+    # files -> their untyped names, as "path:line:col - name is kind", file by file
+    groups: dict[tuple[Path, str], list[Path]] = {}
+    for path in paths:
+        kind = ".pyn" if path.suffix == ".pyn" else ".py"  # each kind runs with its own config
+        groups.setdefault((project_root(path), kind), []).append(path)
+    outputs: dict[Path, str] = {}
+    for (root, _kind), group in groups.items():
+        outputs |= per_file(basedpyright_output(group), root)
+    return [report for path in paths for report in untyped(path, findings(outputs.get(path, "")))]
+
+
+def untyped(path: Path, found_list: list[Finding]) -> list[str]:
+    # path's findings, at its own line numbers -> the names that show white, as "path:line:col - name is kind"
     tree = source_tree(path)
     lines = path.read_text().splitlines()
     # a library's own Unknowns (`from jaxtyping import jaxtyped`): nothing a local annotation can fix
@@ -167,7 +186,7 @@ def check(path: Path) -> list[str]:
         for a in n.names
     }
     hits: set[tuple[int, int, str, str]] = set()
-    for found in findings(out):
+    for found in found_list:
         line = found.line
         col = found.col
         name = found.name
@@ -184,203 +203,10 @@ def check(path: Path) -> list[str]:
     return [f"{path}:{line}:{col} - {name} is {kind}" for line, col, name, kind in sorted(hits)]
 
 
-PROBE = "_redundant_probe"  # prefix of every name the probes add
-REVEAL = re.compile(
-    rf'information: Type of "{PROBE}_(\d+)_(\d+)_(inferred|declared)(?:\(\))?" is "(.*)"'
-)
-LITERAL = re.compile(r"Literal\[(.*)\]")
-# annotations that say more than the type, so never redundant
-QUALIFIERS = {"Final", "ClassVar", "TypeAlias"}
-# a container literal's annotation checks each element (`xs: list[int] = [1, "a"]` is an error,
-# unannotated it's a list[int | str]), so it catches bugs rather than repeating the type
-CONTAINERS = (ast.List, ast.Dict, ast.Set, ast.Tuple, ast.ListComp, ast.DictComp, ast.SetComp)
-
-
-class Annotation(NamedTuple):
-    line: int
-    col: int
-    name: str
-    annotation: str  # as written
-
-
-def checkable(stmt: ast.AnnAssign, lines: list[str]) -> bool:
-    # `name: T = value` the file itself writes (not byname's generated code), with T a plain type
-    if stmt.value is None or not isinstance(stmt.target, ast.Name):
-        return False
-    if not lines[stmt.lineno - 1][stmt.col_offset :].startswith(stmt.target.id):
-        return False
-    # a byname record literal, `row: EvalRow = (step=10, ...)`, is typed by its annotation
-    value = stmt.value
-    if isinstance(value, ast.Call) and getattr(value.func, "id", "").startswith("_rec_"):
-        return False
-    if isinstance(value, CONTAINERS):
-        return False
-    root = stmt.annotation
-    if isinstance(root, ast.Subscript):
-        root = root.value  # Final[int] -> Final
-    root_name = root.attr if isinstance(root, ast.Attribute) else getattr(root, "id", "")
-    return root_name not in QUALIFIERS
-
-
-def rebound(scope: ast.Module | Func) -> set[str]:
-    # names bound more than once in scope. Nested functions count as part of it, so a name only
-    # reused in one of those is skipped too (a missed finding, never a wrong one)
-    binds = Counter(
-        n.id for n in ast.walk(scope) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
-    )
-    return {name for name, count in binds.items() if count > 1}
-
-
-class Probes(ast.NodeTransformer):
-    """Puts two probes before each checkable annotation, in function and module bodies. A class
-    body's annotations declare its fields (NamedTuple, dataclass), so only its methods are visited.
-    A name bound again in its scope is skipped too: the annotation declares the type for every later
-    binding (`out: Tensor = attention(...)`, then `out = self.proj(out)` from an untyped call)."""
-
-    def __init__(self, lines: list[str]):
-        self.lines = lines
-        self.found: list[Annotation] = []
-        self.rebound: set[str] = set()  # names bound more than once in the current scope
-
-    def visit_Module(self, node: ast.Module) -> ast.Module:
-        self.rebound = rebound(node)
-        self.generic_visit(node)
-        return node
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
-        outer = self.rebound
-        self.rebound = rebound(node)
-        self.generic_visit(node)
-        self.rebound = outer
-        return node
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AsyncFunctionDef:
-        outer = self.rebound
-        self.rebound = rebound(node)
-        self.generic_visit(node)
-        self.rebound = outer
-        return node
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
-        node.body = [self.visit(s) if isinstance(s, Func) else s for s in node.body]
-        return node
-
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.stmt | list[ast.stmt]:
-        if not checkable(node, self.lines):
-            return node
-        assert isinstance(node.target, ast.Name) and node.value is not None
-        if node.target.id in self.rebound:
-            return node
-        annotation = ast.unparse(node.annotation)
-        self.found.append(Annotation(node.lineno, node.col_offset, node.target.id, annotation))
-        # the value's type with no annotation to guide it, then T's own type
-        probe = f"{PROBE}_{node.lineno}_{node.col_offset}"
-        probes = ast.parse(
-            f"{probe}_inferred = {ast.unparse(node.value)}\n"
-            f"reveal_type({probe}_inferred)\n"
-            f"def {probe}_declared() -> {annotation}: ...\n"
-            f"reveal_type({probe}_declared())\n"
-        ).body
-        return [*probes, node]
-
-
-def probed(path: Path) -> tuple[str, list[Annotation]]:
-    # the file as Python with the probes in, and the annotations they probe. A .pyn's translation keeps
-    # its line numbers, and its prelude (byname's helpers) goes in after probing so it isn't probed
-    text = path.read_text()
-    lines = text.splitlines()
-    prelude: list[ast.stmt] = []
-    if path.suffix == ".pyn":
-        from byname import transform
-        from byname.transform import prelude_index
-
-        translation = transform(text, str(path))
-        tree = ast.parse(translation.body)
-        prelude = ast.parse(translation.prelude).body
-    else:
-        tree = ast.parse(text)
-    probes = Probes(lines)
-    tree = probes.visit(tree)
-    if prelude:
-        k = prelude_index(tree)
-        tree.body[k:k] = prelude
-    return ast.unparse(tree), probes.found
-
-
-def reveals(out: str) -> dict[tuple[int, int, str], str]:
-    # basedpyright's output -> each probe's revealed type, by (line, col, inferred|declared)
-    found: dict[tuple[int, int, str], str] = {}
-    for text in out.splitlines():
-        hit = REVEAL.search(text)
-        if hit is not None:
-            line_s, col_s, which, type_text = hit.groups()
-            found[(int(line_s), int(col_s), which)] = type_text
-    return found
-
-
-def widened(type_text: str) -> str:
-    # a literal value's type as a variable's: `x = 0` reveals Literal[0], but x is an int
-    hit = LITERAL.fullmatch(type_text)
-    if hit is None or "," in hit.group(1):
-        return type_text
-    value = hit.group(1)
-    if value in ("True", "False"):
-        return "bool"
-    if value.startswith(("b'", 'b"')):
-        return "bytes"
-    if value.startswith(("'", '"')):
-        return "str"
-    if re.fullmatch(r"-?\d+", value):
-        return "int"
-    return value.rsplit(".", 1)[0]  # an enum member: Literal[Color.RED] -> Color
-
-
-def redundant(path: Path) -> list[str]:
-    # one file -> its annotations inference already gives, as "path:line:col - name: T ..."
-    from byname.tools import mirror, mirrored
-
-    source, annotations = probed(path)
-    root = project_root(path)
-    out = mirror(root)
-    rel = mirrored(root, path)
-    assert rel is not None, f"{path} isn't mirrored by byname"
-    probe_file = out / rel.with_name(f"{path.stem}{PROBE}.py")
-    probe_file.write_text(source)
-    try:
-        run = subprocess.run(
-            ["basedpyright", "--pythonpath", sys.executable, str(probe_file)],
-            capture_output=True, text=True, check=False, cwd=out,
-        )
-    finally:
-        # the editor's byname sync drops mirror files with no source, the probe too, when the
-        # project changes mid-run; basedpyright may not have read it, so no reveals isn't a pass
-        removed = not probe_file.exists()
-        probe_file.unlink(missing_ok=True)
-    if removed:
-        return [f"{path} - probe removed mid-run (editor sync), rerun"]
-    types = reveals(run.stdout)
-    lines = path.read_text().splitlines()
-    reports: list[str] = []
-    for a in annotations:
-        inferred = types.get((a.line, a.col, "inferred"))
-        declared = types.get((a.line, a.col, "declared"))
-        if inferred is None or declared is None:
-            continue  # unreachable code: basedpyright reveals nothing there
-        if "Unknown" in declared or declared == "Any":
-            # T is untyped itself (pa.Table without pyarrow's stubs), so the name still shows white
-            reports.append(f"{path}:{a.line}:{a.col + 1} - {a.name}: {a.annotation} is {declared} to the checker")
-        elif widened(inferred) == declared and not EXPLICIT.search(lines[a.line - 1]):
-            reports.append(f"{path}:{a.line}:{a.col + 1} - {a.name}: {a.annotation} is inferred anyway")
-    return reports
-
-
 def main() -> int:
-    args = sys.argv[1:]
-    run_redundant = "--redundant" in args
-    paths = [Path(p).resolve() for p in args if p != "--redundant"]
-    assert paths, "usage: any-check [--redundant] FILE.pyn|FILE.py ..."
-    one_file = redundant if run_redundant else check
-    reports = [report for path in paths for report in one_file(path)]
+    paths = [Path(p).resolve() for p in sys.argv[1:]]
+    assert paths, "usage: any-check FILE.pyn|FILE.py ..."
+    reports = check(paths)
     for report in reports:
         print(report)
     return 1 if reports else 0

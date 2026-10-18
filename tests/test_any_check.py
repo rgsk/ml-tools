@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from ml_tools.any_check import Annotation, findings, probed, reveals, still_completes, widened
+from ml_tools.any_check import findings, per_file, still_completes
 
 # what `byname tool basedpyright` prints with reportUnknownVariableType on: the
 # finding, then the full type on the line under it
@@ -56,77 +56,25 @@ def test_a_bare_unknown_is_still_reported(type_text: str):
     assert not still_completes(type_text)
 
 
-# --redundant: which annotations get probed, how the probes' reveals are read
-# back, and how a literal's revealed type becomes a variable's type
-PROBED_SOURCE = """\
-from typing import Final, NamedTuple
 
-
-class Cfg(NamedTuple):
-    lr: float = 1e-3  # a field, not a variable
-
-
-def train(cfg: Cfg):
-    steps: int = 10
-    LIMIT: Final[int] = 5
-    row: Cfg = _rec_lr(lr=1.0)
-    sizes: list[int] = [1, 2]  # checks each element, so kept
-    n: int
-    out: float = 1.0
-    out = cfg.lr * out  # rebound: the annotation types this line too
+# one `byname tool basedpyright` run over two files: paths relative to the
+# project, a finding with its full type on the line under it, indented with
+# non-breaking spaces, then the run's totals
+ROOT = Path("/p")
+RUN = """\
+src/model.pyn
+  src/model.pyn:256:5 - error: Type of "norms" is partially unknown
+  \xa0\xa0Type of "norms" is "list[Unknown | Tensor]" (reportUnknownVariableType)
+src/train.pyn
+  src/train.pyn:12:9 - error: Type of "logits" is Any (reportAny)
+2 errors, 0 warnings, 0 notes
 """
 
 
-def probed_source(tmp_path: Path) -> tuple[str, list[Annotation]]:
-    path = tmp_path / "train.py"
-    path.write_text(PROBED_SOURCE)
-    return probed(path)
-
-
-def test_only_a_plain_annotated_assignment_is_probed(tmp_path: Path):
-    _source, annotations = probed_source(tmp_path)
-    # the class field, Final, the record literal, the container literal, the
-    # bare `n: int` and the rebound `out` are left alone
-    assert annotations == [Annotation(line=9, col=4, name="steps", annotation="int")]
-
-
-def test_the_probes_go_before_the_assignment(tmp_path: Path):
-    source, _annotations = probed_source(tmp_path)
-    probe_lines = [
-        "_redundant_probe_9_4_inferred = 10",
-        "reveal_type(_redundant_probe_9_4_inferred)",
-        "def _redundant_probe_9_4_declared() -> int:",
-        "reveal_type(_redundant_probe_9_4_declared())",
-        "steps: int = 10",
-    ]
-    stripped = [line.strip() for line in source.splitlines() if line.strip()]
-    start = stripped.index(probe_lines[0])
-    assert stripped[start : start + 6] == [*probe_lines[:3], "...", *probe_lines[3:]]
-
-
-# what basedpyright prints for the two probes of `steps: int = 10` on line 9
-REVEALS = """\
-  /x/train_redundant_probe.py:12:17 - information: Type of "_redundant_probe_9_4_inferred" is "Literal[10]"
-  /x/train_redundant_probe.py:15:17 - information: Type of "_redundant_probe_9_4_declared()" is "int"
-"""
-
-
-def test_each_reveal_is_read_by_its_source_position():
-    assert reveals(REVEALS) == {(9, 4, "inferred"): "Literal[10]", (9, 4, "declared"): "int"}
-
-
-@pytest.mark.parametrize(
-    ("revealed", "variable_type"),
-    [
-        ("Literal[10]", "int"),
-        ("Literal[-1]", "int"),
-        ("Literal['gpt']", "str"),
-        ("Literal[b'x']", "bytes"),
-        ("Literal[True]", "bool"),
-        ("Literal[Color.RED]", "Color"),
-        ("Literal[1, 2]", "Literal[1, 2]"),  # several values: no one class to widen to
-        ("Tensor", "Tensor"),
-    ],
-)
-def test_a_literal_widens_to_its_class(revealed: str, variable_type: str):
-    assert widened(revealed) == variable_type
+def test_one_runs_output_splits_per_file_with_each_findings_full_type():
+    files = per_file(RUN, ROOT)
+    assert list(files) == [ROOT / "src/model.pyn", ROOT / "src/train.pyn"]
+    (norms,) = findings(files[ROOT / "src/model.pyn"])
+    assert norms.type_text == "list[Unknown | Tensor]"
+    (logits,) = findings(files[ROOT / "src/train.pyn"])
+    assert logits.name == "logits"
