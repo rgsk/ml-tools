@@ -35,6 +35,19 @@ about 2s, against any-check's 19s.
 
     uv run annotation-check src/model.pyn tests/test_model.pyn
 
+## Notebooks
+
+Both take a `.ipynb` too. Its code cells are checked as one file (IPython `%`
+and `!` lines left out, so cells see each other's names, as in a run-all), as
+byname when a cell has `%load_ext byname`, and findings come back by cell,
+counting every cell from 1 as Ruff does:
+
+    uv run annotation-check rough/act.ipynb
+    rough/act.ipynb:cell 6:1:17 - action is unknown
+
+A name the file never writes is byname's own (`_ds` behind `(a=, b=) = r`), so
+neither tool reports it.
+
 Both commands come from one dev dependency:
 
     [dependency-groups]

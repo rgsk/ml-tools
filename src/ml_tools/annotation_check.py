@@ -15,7 +15,9 @@ translation, `reveal_type` of value alone and of T, joined by `;` so no line mov
 byname's mirror, next to each file's own so imports resolve, and every file is checked in one run, so
 torch's types load once. Findings map back through byname's own source_position, the way
 `byname tool` maps them, after undoing the probes' column shift.
-Usage: uv run annotation-check FILE.pyn|FILE.py ...
+A notebook is its code cells joined into one file (any_check.notebook), probed and checked the same
+way next to the notebook's own copy in the mirror, and reported by cell: `nb.ipynb:cell 3:2:5`.
+Usage: uv run annotation-check FILE.pyn|FILE.py|FILE.ipynb ...
 """
 
 import ast
@@ -33,9 +35,12 @@ from ml_tools.any_check import (
     Func,
     checker_config,
     findings,
+    is_byname,
     per_file,
     project_root,
+    source_text,
     untyped,
+    where,
 )
 
 PROBE = "_redundant_probe"  # prefix of every name the probes add
@@ -67,14 +72,15 @@ class Probe(NamedTuple):
 
 class Source:
     """A file and the Python basedpyright checks for it: a .pyn's byname translation (`hidden`, with
-    byname's helpers in), a .py as it is. Positions map hidden -> source as `byname tool` maps them."""
+    byname's helpers in), a .py as it is, a notebook as its joined code cells (translated if it loads
+    byname). Positions map hidden -> source as `byname tool` maps them."""
 
     def __init__(self, path: Path):
         self.path = path
-        self.text = path.read_text()
+        self.text = source_text(path)
         self.lines = self.text.splitlines()
         self.translation = None
-        if path.suffix == ".pyn":
+        if is_byname(path):
             from byname.srcmap import Translation
 
             self.translation = Translation(self.text, path)
@@ -235,16 +241,17 @@ def annotation_reports(source: Source, probes: list[Probe], diagnostics: list[st
         declared = types.get((i, "declared"))
         if inferred is None or declared is None:
             continue  # unreachable code: basedpyright reveals nothing there
-        where = f"{source.path}:{a.line}:{a.col + 1}"
+        at = where(source.path, a.line, a.col + 1)
         if "Unknown" in declared or declared == "Any":
-            reports.append(f"{where} - {a.name}: {a.annotation} is {declared} to the checker")
+            reports.append(f"{at} - {a.name}: {a.annotation} is {declared} to the checker")
         elif widened(inferred) == declared and not EXPLICIT.search(source.lines[a.line - 1]):
-            reports.append(f"{where} - {a.name}: {a.annotation} is inferred anyway")
+            reports.append(f"{at} - {a.name}: {a.annotation} is inferred anyway")
     return reports
 
 
-def check_all(paths: list[Path]) -> list[str]:
-    # every file in one basedpyright run -> its reports, file by file
+def check_all(paths: list[Path], annotations: bool = True) -> list[str]:
+    # every file in one basedpyright run -> its reports, file by file. annotations=False: no probes,
+    # any-check's findings only (how any-check checks a notebook)
     from byname.tools import mirror, mirrored
 
     root = project_root(paths[0])
@@ -257,7 +264,7 @@ def check_all(paths: list[Path]) -> list[str]:
     for source in sources:
         rel = mirrored(root, source.path)
         assert rel is not None, f"{source.path} isn't mirrored by byname"
-        text, probes = probed(source)
+        text, probes = probed(source) if annotations else (source.hidden, [])
         probe_file = out / rel.with_name(f"{source.path.stem}{PROBE}.py")
         probe_file.write_text(text)
         probe_files.append(probe_file)
@@ -291,7 +298,7 @@ def check_all(paths: list[Path]) -> list[str]:
 
 def main() -> int:
     paths = [Path(p).resolve() for p in sys.argv[1:]]
-    assert paths, "usage: annotation-check FILE.pyn|FILE.py ..."
+    assert paths, "usage: annotation-check FILE.pyn|FILE.py|FILE.ipynb ..."
     reports = check_all(paths)
     for report in reports:
         print(report)

@@ -9,7 +9,10 @@ A partially unknown name is kept only if part of it shows white: `list[Unknown |
 completes as a Tensor (torch's own untyped returns cause these), `list[Unknown]` doesn't.
 A line with `# any:ok` in its comment is skipped: an Any that's fine (`std *= n ** -0.5  # any:ok`).
 A project's files are checked in one run per config (.pyn or .py), so torch's types load once.
-Usage: uv run any-check FILE.pyn|FILE.py ...
+A notebook is checked as its code cells joined into one file (see notebook), in annotation-check's run
+with no probes, and reported by cell: `nb.ipynb:cell 3:2:5`.
+A name the file never writes is byname's (`_ds` behind `(a=, b=) = r`) and isn't reported.
+Usage: uv run any-check FILE.pyn|FILE.py|FILE.ipynb ...
 """
 
 import ast
@@ -36,6 +39,8 @@ LOCATION = re.compile(r"^\s+(\S+\.pyn?):\d+:\d+ - ")
 UNKNOWN_IN_UNION = re.compile(r"Unknown \| | \| Unknown")
 Func = ast.FunctionDef | ast.AsyncFunctionDef
 SKIP = re.compile(r"#.*\bany:ok\b")
+MAGIC = re.compile(r"^\s*[%!]")  # an IPython magic or shell line, not Python
+LOAD_BYNAME = re.compile(r"^[ \t]*%load_ext[ \t]+byname\b", re.MULTILINE)  # a byname notebook
 
 
 class Finding(NamedTuple):
@@ -44,6 +49,49 @@ class Finding(NamedTuple):
     name: str
     kind: str  # Any, partially unknown or unknown
     type_text: str  # the full type, when basedpyright prints it; "" otherwise
+
+
+class Cell(NamedTuple):
+    number: int  # 1-based, counting every cell, as Ruff does
+    first: int  # its first line in the notebook's joined source, 1-based
+
+
+def notebook(path: Path) -> tuple[str, list[Cell], bool]:
+    # a notebook's code cells as one source, magics blanked so no line moves; where each cell
+    # starts in it; whether a cell loads byname (then the source is a .pyn's)
+    nb = json.loads(path.read_text())
+    parts: list[str] = []
+    cells: list[Cell] = []
+    line = 1
+    uses_byname = False
+    for number, c in enumerate(nb.get("cells", []), 1):
+        if c.get("cell_type") != "code":
+            continue
+        src = c["source"] if isinstance(c["source"], str) else "".join(c["source"])
+        uses_byname |= LOAD_BYNAME.search(src) is not None
+        lines = ["" if MAGIC.match(text) else text for text in src.split("\n")]
+        cells.append(Cell(number, line))
+        parts.append("\n".join(lines))
+        line += len(lines)
+    return "\n".join(parts), cells, uses_byname
+
+
+def source_text(path: Path) -> str:
+    # the source the checker's findings are positioned in: a notebook's joined code cells
+    return notebook(path)[0] if path.suffix == ".ipynb" else path.read_text()
+
+
+def is_byname(path: Path) -> bool:
+    # path's source is written in byname, so it's checked through its translation
+    return path.suffix == ".pyn" or (path.suffix == ".ipynb" and notebook(path)[2])
+
+
+def where(path: Path, line: int, col: int) -> str:
+    # a 1-based position in path's source as reported: a notebook's by cell
+    if path.suffix != ".ipynb":
+        return f"{path}:{line}:{col}"
+    cell = [c for c in notebook(path)[1] if c.first <= line][-1]
+    return f"{path}:cell {cell.number}:{line - cell.first + 1}:{col}"
 
 
 def findings(out: str) -> list[Finding]:
@@ -76,12 +124,12 @@ def still_completes(type_text: str) -> bool:
 
 
 def source_tree(path: Path) -> ast.Module:
-    """AST with the file's own line numbers."""
-    if path.suffix != ".pyn":
-        return ast.parse(path.read_text())
+    """AST with the file's own line numbers (a notebook's: its joined source's)."""
+    if not is_byname(path):
+        return ast.parse(source_text(path))
     from byname import source_ast
 
-    return source_ast(path.read_text(), str(path))
+    return source_ast(source_text(path), str(path))
 
 
 def declared(tree: ast.Module, line: int, name: str) -> bool:
@@ -171,21 +219,30 @@ def per_file(out: str, root: Path) -> dict[Path, str]:
 
 
 def check(paths: list[Path]) -> list[str]:
-    # files -> their untyped names, as "path:line:col - name is kind", file by file
+    # files -> their untyped names, as "path:line:col - name is kind", file by file, notebooks last
     groups: dict[tuple[Path, str], list[Path]] = {}
+    notebooks = [p for p in paths if p.suffix == ".ipynb"]
+    paths = [p for p in paths if p.suffix != ".ipynb"]
     for path in paths:
         kind = ".pyn" if path.suffix == ".pyn" else ".py"  # each kind runs with its own config
         groups.setdefault((project_root(path), kind), []).append(path)
     outputs: dict[Path, str] = {}
     for (root, _kind), group in groups.items():
         outputs |= per_file(basedpyright_output(group), root)
-    return [report for path in paths for report in untyped(path, findings(outputs.get(path, "")))]
+    reports = [report for path in paths for report in untyped(path, findings(outputs.get(path, "")))]
+    if notebooks:
+        from ml_tools.annotation_check import check_all
+
+        reports += check_all(notebooks, annotations=False)
+    return reports
 
 
 def untyped(path: Path, found_list: list[Finding]) -> list[str]:
     # path's findings, at its own line numbers -> the names that show white, as "path:line:col - name is kind"
     tree = source_tree(path)
-    lines = path.read_text().splitlines()
+    source = source_text(path)
+    lines = source.splitlines()
+    written = set(re.findall(r"\w+", source))  # a name not in here is byname's, nothing to fix
     # a library's own Unknowns (`from jaxtyping import jaxtyped`): nothing a local annotation can fix
     imported = {
         (line, (a.asname or a.name).split(".")[0])
@@ -207,6 +264,8 @@ def untyped(path: Path, found_list: list[Finding]) -> list[str]:
         col = found.col
         name = found.name
         text = lines[line - 1]
+        if name not in written:
+            continue
         if not text[col - 1 :].startswith(name):
             # an attribute, reported where its expression starts. Its root is declared, so the Any
             # comes from the expression (`axes[b, 0].imshow` with `axes: np.ndarray`)
@@ -225,12 +284,12 @@ def untyped(path: Path, found_list: list[Finding]) -> list[str]:
             continue
         if not declared(tree, line, name):
             hits.add((line, col, name, found.kind))
-    return [f"{path}:{line}:{col} - {name} is {kind}" for line, col, name, kind in sorted(hits)]
+    return [f"{where(path, line, col)} - {name} is {kind}" for line, col, name, kind in sorted(hits)]
 
 
 def main() -> int:
     paths = [Path(p).resolve() for p in sys.argv[1:]]
-    assert paths, "usage: any-check FILE.pyn|FILE.py ..."
+    assert paths, "usage: any-check FILE.pyn|FILE.py|FILE.ipynb ..."
     reports = check(paths)
     for report in reports:
         print(report)
