@@ -10,6 +10,9 @@ Lists local names whose type is `Any`/`Unknown`, which show white in the editor
 (no colour, no completion), e.g. `logits = model(x)` from an untyped
 `nn.Module` call. Fix one by annotating where the name is first bound
 (`logits: Tensor = model(x)`), or mark a line `# any:ok`.
+Also lists an attribute that's wholly Unknown though no name is bound, e.g.
+`print(ds[0]["img"].shape)` from an untyped `__getitem__`; a library's
+half-typed member (torch's `.numpy()`) still completes and isn't listed.
 
     uv run any-check src/model.pyn tests/test_model.pyn
 

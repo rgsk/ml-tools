@@ -103,6 +103,25 @@ def test_an_attribute_is_reported_only_when_its_root_is_declared(tmp_path: Path)
     assert reports == [f"{path}:1:22 - logits is Any", f"{path}:2:5 - axes[0].imshow is Any"]
 
 
+def test_an_unknown_member_is_reported_from_where_its_expression_starts(tmp_path: Path):
+    # `ds[0]` is dict[Unknown, Unknown] (an untyped __getitem__), so `.shape` on its value is
+    # Unknown though no name is bound
+    path = tmp_path / "x.py"
+    path.write_text('def show(ds: list):\n    print(ds[0]["img"].shape)\n')
+    found = findings('  x.py:2:11 - error: Type of "shape" is unknown (reportUnknownMemberType)\n')
+    assert untyped(path, found) == [f'{path}:2:11 - ds[0]["img"].shape is unknown']
+
+
+def test_a_partially_unknown_member_still_completes_and_is_not_reported(tmp_path: Path):
+    # torch's Tensor.numpy() returns ndarray[Unknown, Unknown]: nothing a local annotation fixes
+    path = tmp_path / "x.py"
+    path.write_text("def show(t: list):\n    t[0].numpy\n")
+    found = findings(
+        '  x.py:2:5 - error: Type of "numpy" is partially unknown (reportUnknownMemberType)\n'
+    )
+    assert untyped(path, found) == []
+
+
 def test_an_unannotated_parameter_is_a_finding():
     (found,) = findings(
         '  x.py:116:16 - error: Type of parameter "event" is unknown (reportUnknownParameterType)\n'

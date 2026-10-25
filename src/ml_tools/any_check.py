@@ -25,7 +25,13 @@ from pathlib import Path
 from typing import NamedTuple
 
 # the rules a normal run leaves off, switched on for this check only
-RULES = {"reportAny": True, "reportUnknownVariableType": True, "reportUnknownParameterType": True}
+# reportUnknownMemberType: an Unknown attribute that binds no name (`print(ds[0]["img"].shape)`)
+RULES = {
+    "reportAny": True,
+    "reportUnknownVariableType": True,
+    "reportUnknownParameterType": True,
+    "reportUnknownMemberType": True,
+}
 CONFIGS = ("pyrightconfig.json", "pyproject.toml")  # where a project configures the checker
 HIT = re.compile(
     r':(\d+):(\d+) - error: Type of (?:parameter )?"(\w+)" is (Any|partially unknown|unknown)'
@@ -272,6 +278,8 @@ def untyped(path: Path, found_list: list[Finding]) -> list[str]:
             root = re.match(r"\w*", text[col - 1 :])
             if (root is not None and root.group() in any_names) or SKIP.search(text):
                 continue
+            if found.kind == "partially unknown":
+                continue  # a library's own half-typed member (torch's `.numpy()`): it still completes
             end = text.find(f".{name}", col - 1)
             shown = text[col - 1 : end + 1 + len(name)] if end >= 0 else name
             hits.add((line, col, shown, found.kind))
