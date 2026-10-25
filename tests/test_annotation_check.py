@@ -11,6 +11,7 @@ from ml_tools.annotation_check import (
     probed,
     reveals,
     source_findings,
+    untyped_annotation,
     widened,
 )
 from ml_tools.any_check import Finding
@@ -97,3 +98,16 @@ def test_a_finding_after_a_probe_moves_back_and_the_probes_own_are_dropped(train
 )
 def test_a_literal_widens_to_its_class(revealed: str, variable_type: str):
     assert widened(revealed) == variable_type
+
+
+@pytest.mark.parametrize(
+    ("declared", "untyped"),
+    [
+        ("Unknown", True),  # `table: pa.Table` without pyarrow's stubs
+        ("Any", True),
+        ("ndarray[tuple[int, ...], dtype[Unknown]]", False),  # `NDArray`: still completes
+        ("dict[str, Tensor]", False),
+    ],
+)
+def test_only_a_wholly_unknown_annotation_is_untyped(declared: str, untyped: bool):
+    assert untyped_annotation(declared) == untyped

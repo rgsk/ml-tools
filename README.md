@@ -26,7 +26,8 @@ editor task uses it):
   for the reader, with `# any:explicit` on its line.
 - untyped: the annotation's type is itself `Unknown`/`Any` to the checker,
   e.g. `table: pa.Table` without pyarrow's stubs, so the name still shows
-  white. `# any:explicit` doesn't hide this one.
+  white. `# any:explicit` doesn't hide this one. A partly typed annotation
+  (`NDArray`, whose dtype is Unknown) still completes and passes.
 
 It leaves alone class fields, `Final`/`ClassVar`/`TypeAlias`, a name bound
 again in its scope (the annotation types the later bindings too), annotations

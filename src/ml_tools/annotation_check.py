@@ -5,7 +5,7 @@ What any-check flags (names that show white), plus annotations that don't earn t
   for the reader, is marked `# any:explicit` on its line.
 - untyped: T itself is Unknown or Any to the checker (`table: pa.Table` without pyarrow's stubs), so
   the name still shows white, though any-check, seeing an annotation, passes it. `# any:explicit`
-  doesn't hide this.
+  doesn't hide this. A partly typed T (`NDArray`, dtype Unknown) still completes and passes.
 Left alone: class fields, Final/ClassVar/TypeAlias, a name bound again in its scope (the annotation
 types the later bindings too), byname record literals and container literals (the annotation types,
 or checks, what's inside).
@@ -231,6 +231,12 @@ def source_findings(source: Source, probes: list[Probe], diagnostics: list[str])
     return moved
 
 
+def untyped_annotation(declared: str) -> bool:
+    # the annotation's type is wholly Unknown or Any; a partly typed one (`NDArray` as
+    # `ndarray[tuple[int, ...], dtype[Unknown]]`) still completes
+    return declared in ("Unknown", "Any")
+
+
 def annotation_reports(source: Source, probes: list[Probe], diagnostics: list[str]) -> list[str]:
     # the probes' reveals -> the redundant and the untyped annotations
     types = reveals(diagnostics)
@@ -242,7 +248,7 @@ def annotation_reports(source: Source, probes: list[Probe], diagnostics: list[st
         if inferred is None or declared is None:
             continue  # unreachable code: basedpyright reveals nothing there
         at = where(source.path, a.line, a.col + 1)
-        if "Unknown" in declared or declared == "Any":
+        if untyped_annotation(declared):
             reports.append(f"{at} - {a.name}: {a.annotation} is {declared} to the checker")
         elif widened(inferred) == declared and not EXPLICIT.search(source.lines[a.line - 1]):
             reports.append(f"{at} - {a.name}: {a.annotation} is inferred anyway")
