@@ -215,8 +215,9 @@ def widened(type_text: str) -> str:
 
 
 def source_findings(source: Source, probes: list[Probe], diagnostics: list[str]) -> list[Finding]:
-    # any-check's findings in the probed copy -> at source positions. A probe's own names are dropped,
-    # and a finding after a probe on its line moves back by the probe's width
+    # any-check's findings in the probed copy -> at source positions. A probe's own are dropped (its names,
+    # and anything in its text: it copies the value and the annotation, `pa.Table` in a cast), and a finding
+    # after a probe on its line moves back by the probe's width
     shifts = {p.hidden_line: p for p in probes}
     moved: list[Finding] = []
     for found in findings("\n".join(diagnostics)):
@@ -225,6 +226,8 @@ def source_findings(source: Source, probes: list[Probe], diagnostics: list[str])
         line = found.line - 1
         col = found.col - 1
         probe = shifts.get(line)
+        if probe is not None and probe.at <= col < probe.at + probe.width:
+            continue
         if probe is not None and col >= probe.at:
             col -= probe.width
         mapped = source.to_source(line, col, f'Type of "{found.name}" is {found.kind}')

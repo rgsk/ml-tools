@@ -77,9 +77,11 @@ def test_a_finding_after_a_probe_moves_back_and_the_probes_own_are_dropped(train
     _text, (probe,) = probed(train_source)
     steps_col = STEPS.index("steps") + 1  # 1-based, as basedpyright counts
     in_probe = f'  {PROBE_FILE}:{STEPS_LINE}:{probe.at + 30} - error: Type of "_redundant_probe_0_inferred" is Any'
+    # the probe copies the annotation and the value, so a finding on them is in its text too (`pa.Table`)
+    copied = f'  {PROBE_FILE}:{STEPS_LINE}:{probe.at + probe.width - 5} - error: Type of "Table" is unknown'
     # `steps` sits after the probe, so basedpyright sees it probe.width further right
     after_probe = f'  {PROBE_FILE}:{STEPS_LINE}:{steps_col + probe.width} - error: Type of "steps" is Any'
-    (found,) = source_findings(train_source, [probe], [in_probe, after_probe])
+    (found,) = source_findings(train_source, [probe], [in_probe, copied, after_probe])
     assert found == Finding(line=STEPS_LINE, col=steps_col, name="steps", kind="Any", type_text="")
 
 
