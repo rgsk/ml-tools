@@ -113,3 +113,28 @@ def test_a_literal_widens_to_its_class(revealed: str, variable_type: str):
 )
 def test_only_a_wholly_unknown_annotation_is_untyped(declared: str, untyped: bool):
     assert untyped_annotation(declared) == untyped
+
+
+def test_live_annotation_verdicts_from_the_editors_answers():
+    # byname asks lsp_reveals' expressions in the editor's own check and hands the answers, in order, to the
+    # filter: annotation-check's verdicts, as warnings on the name, with no run of its own
+    import ast
+
+    from ml_tools.annotation_check import annotation_diagnostics, lsp_reveals
+
+    source = 'x: Tensor = make()\nout: Tensor = conv(x)\nt: pa.Table = load()\nn: int = 0  # any:explicit\n'
+    tree = ast.parse(source)
+    asks = lsp_reveals(path=None, source=source, tree=tree)
+    assert [(line, expr, is_type) for line, _, expr, is_type in asks] == [
+        (1, "make()", False), (1, "Tensor", True),
+        (2, "conv(x)", False), (2, "Tensor", True),
+        (3, "load()", False), (3, "pa.Table", True),
+        (4, "0", False), (4, "int", True),
+    ]
+    answers = ["Tensor", "Tensor", "Any", "Tensor", "Any", "Unknown", "int", "int"]
+    shown = annotation_diagnostics(source, tree, answers)
+    assert [(d["range"]["start"]["line"], d["message"]) for d in shown] == [
+        (0, "x: Tensor is inferred anyway"),
+        (2, "t: pa.Table is Unknown to the checker"),
+    ]  # out's annotation types a call that's Any; n's is kept on purpose
+    assert annotation_diagnostics(source, tree, [None] * 8) == []  # unanswered (unreachable code): nothing

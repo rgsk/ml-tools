@@ -260,6 +260,42 @@ def annotation_reports(source: Source, probes: list[Probe], diagnostics: list[st
     return reports
 
 
+def lsp_reveals(*, path: Path | None, source: str, tree: ast.Module) -> list[tuple[int, int, str, bool]]:
+    """byname.diagnosticsReveals: annotation-check's probes, asked in the editor's own check instead of a run of
+    its own. For each checkable `name: T = value` (candidates), the value's type, then T's, before the
+    statement; annotation_diagnostics reads the answers, in this order."""
+    asks: list[tuple[int, int, str, bool]] = []
+    for stmt in candidates(tree):
+        asks.append((stmt.lineno, stmt.col_offset, ast.unparse(stmt.value), False))
+        asks.append((stmt.lineno, stmt.col_offset, ast.unparse(stmt.annotation), True))
+    return asks
+
+
+def annotation_diagnostics(source: str, tree: ast.Module, answers: list[str | None]) -> list[dict]:
+    # the checker's answers to lsp_reveals' asks -> the redundant and untyped annotations, as LSP warnings on
+    # the name (annotation_reports' verdicts). An ask with no answer (unreachable code) says nothing
+    lines = source.splitlines()
+    out: list[dict] = []
+    for i, stmt in enumerate(candidates(tree)):
+        inferred, declared = (answers[2 * i : 2 * i + 2] + [None, None])[:2]
+        if inferred is None or declared is None or stmt.lineno > len(lines):
+            continue
+        name = getattr(stmt.target, "id", "")
+        text = lines[stmt.lineno - 1]
+        annotation = ast.unparse(stmt.annotation)
+        if untyped_annotation(declared):
+            message = f"{name}: {annotation} is {declared} to the checker"
+        elif widened(inferred) == declared and not EXPLICIT.search(text):
+            message = f"{name}: {annotation} is inferred anyway"
+        else:
+            continue
+        at = re.match(rf"\s*({re.escape(name)})\b", text)
+        col = at.start(1) if at else 0
+        start, end = {"line": stmt.lineno - 1, "character": col}, {"line": stmt.lineno - 1, "character": col + len(name)}
+        out.append({"range": {"start": start, "end": end}, "severity": 2, "source": "annotation-check", "message": message})
+    return out
+
+
 def check_all(paths: list[Path], annotations: bool = True, names: bool = True) -> list[str]:
     # every file in one basedpyright run -> its reports, file by file. annotations=False: no probes,
     # any-check's findings only (how any-check checks a notebook). names=False: the annotations' only

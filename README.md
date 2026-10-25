@@ -56,8 +56,14 @@ In the project's `.vscode/settings.json`:
 "byname.diagnosticsFilter": "ml_tools.any_check:lsp_filter"
 ```
 
-The annotation checks need annotation-check's probe run, so they aren't
-live: run annotation-check for them, by hand (Alt+L) or on save;
+The annotation checks (redundant, untyped) are live too with byname 0.4.9+,
+whose checker answers annotation-check's probes in its own pass:
+
+```json
+"byname.diagnosticsReveals": "ml_tools.annotation_check:lsp_reveals"
+```
+
+Without it, run annotation-check for them, by hand (Alt+L) or on save;
 `--annotations-only` leaves out the names the editor already shows.
 
 ## Notebooks

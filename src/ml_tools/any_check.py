@@ -303,10 +303,19 @@ def white_names(source: str, tree: ast.Module, found_list: list[Finding]) -> set
 MESSAGE = re.compile(r'^Type of (?:parameter )?"(\w+)" is (Any|partially unknown|unknown)$')
 
 
-def lsp_filter(*, path: Path | None, source: str, tree: ast.Module | None, diagnostics: list[dict]) -> list[dict]:
+def lsp_filter(
+    *,
+    path: Path | None,
+    source: str,
+    tree: ast.Module | None,
+    diagnostics: list[dict],
+    reveals: list[str | None] | None = None,
+) -> list[dict]:
     """byname.diagnosticsFilter: any-check as you type, with byname.checkerRules switching RULES on. Of
     those rules' findings, the names that show white stay, as warnings `name is kind`; every other
-    diagnostic passes as it came. No tree (byname couldn't parse the text): none of the rules' findings."""
+    diagnostic passes as it came. No tree (byname couldn't parse the text): none of the rules' findings.
+    reveals: with byname.diagnosticsReveals = annotation_check.lsp_reveals, the checker's answers, which make
+    annotation-check's redundant and untyped annotations live too."""
     rest = [d for d in diagnostics if d.get("code") not in RULES]
     found: dict[tuple[int, int], dict] = {}
     findings_here: list[Finding] = []
@@ -322,6 +331,10 @@ def lsp_filter(*, path: Path | None, source: str, tree: ast.Module | None, diagn
         findings_here.append(Finding(*at, hit[1], hit[2], type_text))
     if tree is None:
         return rest
+    if reveals:
+        from ml_tools.annotation_check import annotation_diagnostics
+
+        rest += annotation_diagnostics(source, tree, reveals)
     shown = [
         {**found[(line, col)], "severity": 2, "message": f"{name} is {kind}", "source": "any-check"}
         for line, col, name, kind in sorted(white_names(source, tree, findings_here))
