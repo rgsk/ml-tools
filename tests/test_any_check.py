@@ -1,6 +1,7 @@
 # any-check's decisions, on basedpyright output written out by hand: which
 # findings it reads, and which partially unknown names still complete in the
 # editor and so aren't reported
+import ast
 import json
 from pathlib import Path
 
@@ -164,3 +165,30 @@ def test_a_notebook_finding_is_reported_by_cell(tmp_path: Path):
     path.write_text(json.dumps(plain))
     found = findings('  nb.py:5:7 - error: Type of parameter "x" is unknown (reportUnknownParameterType)\n')
     assert untyped(path, found) == [f"{path}:cell 3:3:7 - x is unknown"]
+
+
+def lsp(line: int, col: int, message: str, code: str) -> dict:
+    # a diagnostic as byname's diagnosticsFilter gets it: 0-based position, the full type under the finding
+    return {"range": {"start": {"line": line, "character": col}}, "message": message, "code": code}
+
+
+def test_lsp_filter_keeps_the_white_names_as_warnings_and_passes_the_rest():
+    from ml_tools.any_check import lsp_filter
+
+    source = 'def show(t: list, logits):\n    out: int = t[0].numpy\n    x = logits\n    y: int = "a"\n'
+    diagnostics = [
+        lsp(0, 18, 'Type of parameter "logits" is unknown', "reportUnknownParameterType"),
+        lsp(1, 15, 'Type of "numpy" is partially unknown\n  Type of "numpy" is "() -> list[Unknown]"', "reportUnknownMemberType"),
+        lsp(1, 4, 'Type of "out" is Any', "reportAny"),  # annotated
+        lsp(2, 4, 'Type of "x" is unknown', "reportUnknownVariableType"),
+        lsp(3, 13, 'Type "Literal[\'a\']" is not assignable to declared type "int"', "reportAssignmentType"),
+        lsp(2, 8, "Return type is Any", "reportAny"),  # not a name
+    ]
+    shown = lsp_filter(path=None, source=source, tree=ast.parse(source), diagnostics=diagnostics)
+    assert [(d["message"], d.get("severity")) for d in shown] == [
+        ('Type "Literal[\'a\']" is not assignable to declared type "int"', None),  # passed as it came
+        ("logits is unknown", 2),
+        ("x is unknown", 2),
+    ]
+    # no tree (byname couldn't parse the text yet): the rules' findings can't be judged, so none show
+    assert lsp_filter(path=None, source=source, tree=None, diagnostics=diagnostics) == [diagnostics[4]]

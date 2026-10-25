@@ -39,6 +39,27 @@ about 2s.
 
     uv run annotation-check src/model.pyn tests/test_model.pyn
 
+## In the editor, as you type
+
+byname (0.4.8+) runs any-check live: its checker reports with any-check's
+rules on, and `lsp_filter` keeps the names that show white, as warnings.
+A fix clears its squiggles at once, and the ones computed from it too.
+In the project's `.vscode/settings.json`:
+
+```json
+"byname.checkerRules": {
+    "reportAny": "warning",
+    "reportUnknownVariableType": "warning",
+    "reportUnknownParameterType": "warning",
+    "reportUnknownMemberType": "warning"
+},
+"byname.diagnosticsFilter": "ml_tools.any_check:lsp_filter"
+```
+
+The annotation checks need annotation-check's probe run, so they aren't
+live: run annotation-check for them, by hand (Alt+L) or on save;
+`--annotations-only` leaves out the names the editor already shows.
+
 ## Notebooks
 
 Both take a `.ipynb` too. Its code cells are checked as one file (IPython `%`

@@ -17,7 +17,9 @@ torch's types load once. Findings map back through byname's own source_position,
 `byname tool` maps them, after undoing the probes' column shift.
 A notebook is its code cells joined into one file (any_check.notebook), probed and checked the same
 way next to the notebook's own copy in the mirror, and reported by cell: `nb.ipynb:cell 3:2:5`.
-Usage: uv run annotation-check FILE.pyn|FILE.py|FILE.ipynb ...
+--annotations-only leaves any-check's names out: in the editor byname shows those as you type
+(any_check.lsp_filter), so a check on save reports the annotations alone.
+Usage: uv run annotation-check [--annotations-only] FILE.pyn|FILE.py|FILE.ipynb ...
 """
 
 import ast
@@ -255,9 +257,9 @@ def annotation_reports(source: Source, probes: list[Probe], diagnostics: list[st
     return reports
 
 
-def check_all(paths: list[Path], annotations: bool = True) -> list[str]:
+def check_all(paths: list[Path], annotations: bool = True, names: bool = True) -> list[str]:
     # every file in one basedpyright run -> its reports, file by file. annotations=False: no probes,
-    # any-check's findings only (how any-check checks a notebook)
+    # any-check's findings only (how any-check checks a notebook). names=False: the annotations' only
     from byname.tools import mirror, mirrored
 
     root = project_root(paths[0])
@@ -297,15 +299,18 @@ def check_all(paths: list[Path], annotations: bool = True) -> list[str]:
             reports.append(f"{source.path} - probe removed mid-run (editor sync), rerun")
             continue
         file_diagnostics = diagnostics.get(probe_file.resolve(), "").splitlines()
-        reports += untyped(source.path, source_findings(source, probes, file_diagnostics))
+        if names:
+            reports += untyped(source.path, source_findings(source, probes, file_diagnostics))
         reports += annotation_reports(source, probes, file_diagnostics)
     return reports
 
 
 def main() -> int:
-    paths = [Path(p).resolve() for p in sys.argv[1:]]
-    assert paths, "usage: annotation-check FILE.pyn|FILE.py|FILE.ipynb ..."
-    reports = check_all(paths)
+    args = sys.argv[1:]
+    names = "--annotations-only" not in args
+    paths = [Path(p).resolve() for p in args if p != "--annotations-only"]
+    assert paths, "usage: annotation-check [--annotations-only] FILE.pyn|FILE.py|FILE.ipynb ..."
+    reports = check_all(paths, names=names)
     for report in reports:
         print(report)
     return 1 if reports else 0

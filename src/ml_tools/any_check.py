@@ -245,8 +245,12 @@ def check(paths: list[Path]) -> list[str]:
 
 def untyped(path: Path, found_list: list[Finding]) -> list[str]:
     # path's findings, at its own line numbers -> the names that show white, as "path:line:col - name is kind"
-    tree = source_tree(path)
-    source = source_text(path)
+    hits = white_names(source_text(path), source_tree(path), found_list)
+    return [f"{where(path, line, col)} - {name} is {kind}" for line, col, name, kind in sorted(hits)]
+
+
+def white_names(source: str, tree: ast.Module, found_list: list[Finding]) -> set[tuple[int, int, str, str]]:
+    # a file's findings -> the ones that show white, as (line, col, name as shown, kind)
     lines = source.splitlines()
     written = set(re.findall(r"\w+", source))  # a name not in here is byname's, nothing to fix
     # a library's own Unknowns (`from jaxtyping import jaxtyped`): nothing a local annotation can fix
@@ -292,7 +296,37 @@ def untyped(path: Path, found_list: list[Finding]) -> list[str]:
             continue
         if not declared(tree, line, name):
             hits.add((line, col, name, found.kind))
-    return [f"{where(path, line, col)} - {name} is {kind}" for line, col, name, kind in sorted(hits)]
+    return hits
+
+
+# a diagnostic's message as the editor gets it: the finding, then the full type on the line under it
+MESSAGE = re.compile(r'^Type of (?:parameter )?"(\w+)" is (Any|partially unknown|unknown)$')
+
+
+def lsp_filter(*, path: Path | None, source: str, tree: ast.Module | None, diagnostics: list[dict]) -> list[dict]:
+    """byname.diagnosticsFilter: any-check as you type, with byname.checkerRules switching RULES on. Of
+    those rules' findings, the names that show white stay, as warnings `name is kind`; every other
+    diagnostic passes as it came. No tree (byname couldn't parse the text): none of the rules' findings."""
+    rest = [d for d in diagnostics if d.get("code") not in RULES]
+    found: dict[tuple[int, int], dict] = {}
+    findings_here: list[Finding] = []
+    for d in diagnostics:
+        lines = d.get("message", "").split("\n")
+        if d.get("code") not in RULES or (hit := MESSAGE.match(lines[0])) is None:
+            continue
+        detail = DETAIL.match(lines[1]) if len(lines) > 1 else None
+        type_text = detail.group(2) if detail is not None and detail.group(1) == hit[1] else ""
+        start = d["range"]["start"]  # 0-based; findings count from 1, as the command line prints them
+        at = (start["line"] + 1, start["character"] + 1)
+        found[at] = d
+        findings_here.append(Finding(*at, hit[1], hit[2], type_text))
+    if tree is None:
+        return rest
+    shown = [
+        {**found[(line, col)], "severity": 2, "message": f"{name} is {kind}", "source": "any-check"}
+        for line, col, name, kind in sorted(white_names(source, tree, findings_here))
+    ]
+    return rest + shown
 
 
 def main() -> int:
