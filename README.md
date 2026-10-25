@@ -35,7 +35,7 @@ that change the type (`x: float = 0`), byname record literals
 (`row: EvalRow = (step=10, ...)`) and container literals
 (`metrics: dict[str, float] = {...}`, whose annotation checks each element).
 Every file goes in one run, so torch's types load once: all of llm-final in
-about 2s, against any-check's 19s.
+about 2s.
 
     uv run annotation-check src/model.pyn tests/test_model.pyn
 
