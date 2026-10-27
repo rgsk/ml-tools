@@ -66,6 +66,21 @@ whose checker answers annotation-check's probes in its own pass:
 Without it, run annotation-check for them, by hand (Alt+L) or on save;
 `--annotations-only` leaves out the names the editor already shows.
 
+Cost, measured 2026-10-27 (median of 6 opens and 90 edits, to diagnostics) on
+dream-robot's `flow_matching/train.py` (torch) with 40 annotated locals added:
+
+| On | Open | Edit |
+|---|---|---|
+| nothing | 1584 ms | 481 ms |
+| rules | 1605 ms | 490 ms |
+| rules + `lsp_filter` | 1617 ms | 495 ms |
+| rules + `lsp_filter` + `lsp_reveals` | 1636 ms | 511 ms |
+
+Each step is ~10-20 ms, almost all of it this package's own code.
+`lsp_filter` and `lsp_reveals` run on every edit, so they need to stay fast:
+the filter used to walk the whole tree once per finding (`declared`), +100 ms
+per edit on that file, until it built one index per call.
+
 ## Notebooks
 
 Both take a `.ipynb` too. Its code cells are checked as one file (IPython `%`

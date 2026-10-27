@@ -138,29 +138,37 @@ def source_tree(path: Path) -> ast.Module:
     return source_ast(source_text(path), str(path))
 
 
-def declared(tree: ast.Module, line: int, name: str) -> bool:
-    """`name` is annotated (parameter or `name: T`) in the innermost function around `line`."""
-    scope: ast.Module | Func = tree
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, Func)
-            and node.lineno <= line <= (node.end_lineno or 0)
-            and (isinstance(scope, ast.Module) or node.lineno >= scope.lineno)
-        ):
-            scope = node
-    if isinstance(scope, Func):
-        a = scope.args
-        if any(
-            p.arg == name and p.annotation
-            for p in [*a.posonlyargs, *a.args, *a.kwonlyargs]
-        ):
-            return True
-    return any(
-        isinstance(n, ast.AnnAssign)
-        and isinstance(n.target, ast.Name)
-        and n.target.id == name
-        for n in ast.walk(scope)
-    )
+class Declared:
+    """`declared(line, name)`: `name` is annotated (parameter or `name: T`) in the innermost function around
+    `line`. Built once per tree: a walk per call cost a file's findings times its size (100 ms per edit on a
+    torch train.py with 135 findings), so the functions are listed once and each scope's names kept."""
+
+    def __init__(self, tree: ast.Module):
+        self.tree = tree
+        self.funcs = [n for n in ast.walk(tree) if isinstance(n, Func)]
+        self.names: dict[int, set[str]] = {}  # id(scope) -> its annotated names, filled as asked
+
+    def scope_names(self, scope: ast.Module | Func) -> set[str]:
+        if (names := self.names.get(id(scope))) is None:
+            names = {
+                n.target.id
+                for n in ast.walk(scope)
+                if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
+            }
+            if isinstance(scope, Func):
+                a = scope.args
+                names |= {p.arg for p in [*a.posonlyargs, *a.args, *a.kwonlyargs] if p.annotation}
+            self.names[id(scope)] = names
+        return names
+
+    def __call__(self, line: int, name: str) -> bool:
+        scope: ast.Module | Func = self.tree
+        for node in self.funcs:
+            if node.lineno <= line <= (node.end_lineno or 0) and (
+                isinstance(scope, ast.Module) or node.lineno >= scope.lineno
+            ):
+                scope = node
+        return name in self.scope_names(scope)
 
 
 def project_root(path: Path) -> Path:
@@ -261,12 +269,13 @@ def white_names(source: str, tree: ast.Module, found_list: list[Finding]) -> set
         for line in range(n.lineno, (n.end_lineno or n.lineno) + 1)
         for a in n.names
     }
+    declared = Declared(tree)
     # undeclared names that are Any themselves. An attribute of one (`logits.shape`) is fixed by
     # annotating the name, so only the name is reported
     any_names = {
         f.name
         for f in found_list
-        if lines[f.line - 1][f.col - 1 :].startswith(f.name) and not declared(tree, f.line, f.name)
+        if lines[f.line - 1][f.col - 1 :].startswith(f.name) and not declared(f.line, f.name)
     }
     hits: set[tuple[int, int, str, str]] = set()
     for found in found_list:
@@ -294,7 +303,7 @@ def white_names(source: str, tree: ast.Module, found_list: list[Finding]) -> set
             continue
         if found.kind == "partially unknown" and still_completes(found.type_text):
             continue
-        if not declared(tree, line, name):
+        if not declared(line, name):
             hits.add((line, col, name, found.kind))
     return hits
 
